@@ -5,6 +5,7 @@
 
 // Proporciona funciones generales del sistema ESP32.
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 
 // Nombre visible de la red creada por el ESP32.
 constexpr char ACCESS_POINT_NAME[] = "ESP32-RTOS";
@@ -20,8 +21,15 @@ struct SystemSnapshot
 {
     // Ultima lectura obtenida del sensor Hall interno.
     int hallValue;
+    // Valores extremos y promedio de las lecturas del Hall.
+    int hallMinimum;
+    int hallMaximum;
+    float hallAverage;
     // Memoria dinamica disponible en bytes.
     uint32_t freeHeap;
+    // Menor heap y mayor bloque libre observados.
+    uint32_t minimumFreeHeap;
+    uint32_t largestFreeBlock;
     // Minima pila libre de la tarea Sensor.
     uint32_t sensorStack;
     // Minima pila libre de la tarea Diagnostico.
@@ -32,6 +40,10 @@ struct SystemSnapshot
     float cpu1Usage;
     // Segundos transcurridos desde el arranque.
     uint32_t uptimeSeconds;
+    // Datos simples de la red y del sistema.
+    uint8_t connectedStations;
+    uint32_t taskCount;
+    uint8_t wifiChannel;
 };
 
 // Servidor HTTP que atiende las solicitudes del celular.
@@ -48,6 +60,8 @@ SystemSnapshot snapshot = {};
 // Lee el sensor interno en el nucleo reservado para el trabajo determinista.
 void sensorTask(void *parameter)
 {
+    uint32_t sampleCount = 0;
+
     while (true)
     {
         // hallRead devuelve la medicion actual del sensor Hall interno.
@@ -58,6 +72,21 @@ void sensorTask(void *parameter)
         {
             // Publica la medicion para que la use el servidor web.
             snapshot.hallValue = currentHallValue;
+            if (sampleCount == 0)
+            {
+                snapshot.hallMinimum = currentHallValue;
+                snapshot.hallMaximum = currentHallValue;
+                snapshot.hallAverage = currentHallValue;
+            }
+            else
+            {
+                snapshot.hallMinimum = min(snapshot.hallMinimum, currentHallValue);
+                snapshot.hallMaximum = max(snapshot.hallMaximum, currentHallValue);
+                snapshot.hallAverage =
+                    (snapshot.hallAverage * sampleCount + currentHallValue) /
+                    (sampleCount + 1);
+            }
+            sampleCount++;
             // Consulta el minimo historico de pila libre de esta tarea.
             snapshot.sensorStack = uxTaskGetStackHighWaterMark(nullptr);
             // Permite que otra tarea consulte la instantanea.
@@ -136,10 +165,18 @@ void diagnosticsTask(void *parameter)
         {
             // xPortGetFreeHeapSize informa el heap disponible para el programa.
             snapshot.freeHeap = xPortGetFreeHeapSize();
+            // Estas dos medidas ayudan a detectar fragmentacion del heap.
+            snapshot.minimumFreeHeap = ESP.getMinFreeHeap();
+            snapshot.largestFreeBlock =
+                heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
             // Consulta el minimo historico de pila libre de esta tarea.
             snapshot.diagnosticsStack = uxTaskGetStackHighWaterMark(nullptr);
             // millis permite mostrar cuanto tiempo lleva activo el sistema.
             snapshot.uptimeSeconds = millis() / 1000UL;
+            // Cuenta clientes, tareas y canal del punto de acceso.
+            snapshot.connectedStations = WiFi.softAPgetStationNum();
+            snapshot.taskCount = uxTaskGetNumberOfTasks();
+            snapshot.wifiChannel = WiFi.channel();
             // Libera el mutex despues de actualizar todos los campos.
             xSemaphoreGive(snapshotMutex);
         }
@@ -162,12 +199,25 @@ String snapshotAsJson()
     // Comienza el objeto JSON que consumira el codigo JavaScript.
     String json = "{";
     json += "\"hall\":" + String(currentSnapshot.hallValue);
+    json += ",\"hallMinimum\":" + String(currentSnapshot.hallMinimum);
+    json += ",\"hallMaximum\":" + String(currentSnapshot.hallMaximum);
+    json += ",\"hallAverage\":" + String(currentSnapshot.hallAverage, 1);
     json += ",\"heap\":" + String(currentSnapshot.freeHeap);
+    json += ",\"minimumFreeHeap\":" + String(currentSnapshot.minimumFreeHeap);
+    json += ",\"largestFreeBlock\":" + String(currentSnapshot.largestFreeBlock);
     json += ",\"sensorStack\":" + String(currentSnapshot.sensorStack);
     json += ",\"diagnosticsStack\":" + String(currentSnapshot.diagnosticsStack);
     json += ",\"cpu0\":" + String(currentSnapshot.cpu0Usage, 1);
     json += ",\"cpu1\":" + String(currentSnapshot.cpu1Usage, 1);
     json += ",\"uptime\":" + String(currentSnapshot.uptimeSeconds);
+    json += ",\"connectedStations\":" + String(currentSnapshot.connectedStations);
+    json += ",\"taskCount\":" + String(currentSnapshot.taskCount);
+    json += ",\"wifiChannel\":" + String(currentSnapshot.wifiChannel);
+    json += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
+    json += ",\"chip\":\"" + String(ESP.getChipModel()) + "\"";
+    json += ",\"cpuMHz\":" + String(ESP.getCpuFreqMHz());
+    json += ",\"flashKB\":" + String(ESP.getFlashChipSize() / 1024);
+    json += ",\"psramKB\":" + String(ESP.getPsramSize() / 1024);
     // Cierra el objeto JSON antes de devolverlo al cliente.
     json += "}";
     return json;
@@ -195,9 +245,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <p><span>CPU Core 0</span><strong id="cpu0">-</strong></p>
     <p><span>CPU Core 1</span><strong id="cpu1">-</strong></p>
     <p><span>Heap libre</span><strong id="heap">-</strong></p>
+        <p><span>Heap libre minimo</span><strong id="minimumFreeHeap">-</strong></p>
+        <p><span>Bloque libre mas grande</span><strong id="largestFreeBlock">-</strong></p>
     <p><span>Sensor Hall</span><strong id="hall">-</strong></p>
     <p><span>Tiempo activo</span><strong id="uptime">-</strong></p>
   </section>
+    <section>
+        <h2>Red y sistema</h2>
+        <p><span>Dispositivos conectados</span><strong id="connectedStations">-</strong></p>
+        <p><span>Direccion IP</span><strong id="ip">-</strong></p>
+        <p><span>Canal Wi-Fi</span><strong id="wifiChannel">-</strong></p>
+        <p><span>Tareas FreeRTOS</span><strong id="taskCount">-</strong></p>
+        <p><span>Chip</span><strong id="chip">-</strong></p>
+        <p><span>CPU</span><strong id="cpuMHz">-</strong></p>
+        <p><span>Flash</span><strong id="flashKB">-</strong></p>
+        <p><span>PSRAM</span><strong id="psramKB">-</strong></p>
+    </section>
+    <section>
+        <h2>Estadisticas del Hall</h2>
+        <p><span>Minimo</span><strong id="hallMinimum">-</strong></p>
+        <p><span>Maximo</span><strong id="hallMaximum">-</strong></p>
+        <p><span>Promedio</span><strong id="hallAverage">-</strong></p>
+    </section>
   <section>
     <h2>Pila minima libre (palabras)</h2>
     <p><span>Tarea Sensor, Core 1</span><strong id="sensorStack">-</strong></p>
@@ -212,10 +281,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.querySelector('#cpu0').textContent = data.cpu0 + ' %';
       document.querySelector('#cpu1').textContent = data.cpu1 + ' %';
       document.querySelector('#heap').textContent = data.heap + ' bytes';
+    document.querySelector('#minimumFreeHeap').textContent = data.minimumFreeHeap + ' bytes';
+    document.querySelector('#largestFreeBlock').textContent = data.largestFreeBlock + ' bytes';
       document.querySelector('#hall').textContent = data.hall;
       document.querySelector('#uptime').textContent = data.uptime + ' s';
+    document.querySelector('#connectedStations').textContent = data.connectedStations;
+    document.querySelector('#ip').textContent = data.ip;
+    document.querySelector('#wifiChannel').textContent = data.wifiChannel;
+    document.querySelector('#taskCount').textContent = data.taskCount;
+    document.querySelector('#chip').textContent = data.chip;
+    document.querySelector('#cpuMHz').textContent = data.cpuMHz + ' MHz';
+    document.querySelector('#flashKB').textContent = data.flashKB + ' KB';
+    document.querySelector('#psramKB').textContent = data.psramKB + ' KB';
       document.querySelector('#sensorStack').textContent = data.sensorStack;
       document.querySelector('#diagnosticsStack').textContent = data.diagnosticsStack;
+    document.querySelector('#hallMinimum').textContent = data.hallMinimum;
+    document.querySelector('#hallMaximum').textContent = data.hallMaximum;
+    document.querySelector('#hallAverage').textContent = data.hallAverage;
     }
     // Carga datos apenas termina de abrirse la pagina.
     updatePanel();

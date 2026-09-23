@@ -7,9 +7,11 @@ La tarea `Sensor` queda fijada al Core 1 y lee el sensor Hall interno. La red y 
 asincrono quedan gestionados por el Core 0. El panel actualiza cada segundo:
 
 - uso estimado de CPU de cada nucleo;
-- heap libre;
-- lectura del sensor Hall;
+- heap libre actual, minimo y bloque contiguo mas grande;
+- lectura actual, minimo, maximo y promedio del sensor Hall;
 - tiempo activo;
+- cantidad de dispositivos conectados al punto de acceso;
+- IP, canal Wi-Fi, cantidad de tareas y datos basicos del chip;
 - high water mark de la pila de las tareas educativas.
 
 ## Observaciones didacticas
