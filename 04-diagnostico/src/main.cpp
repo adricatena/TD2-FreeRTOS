@@ -359,16 +359,18 @@ void setup()
     Serial.println(WiFi.softAPIP());
 
     // Sensor y diagnostico comparten el ultimo nucleo disponible.
+    constexpr BaseType_t workerCore = SOC_CPU_CORES_NUM > 1 ? 1 : 0;
+
 #if SOC_HALL_SENSOR_SUPPORTED
     xTaskCreatePinnedToCore(sensorTask, "Sensor", 2048, nullptr, 2,
-                            &sensorTaskHandle, CONFIG_FREERTOS_UNICORE ? 0 : 1);
+                            &sensorTaskHandle, workerCore);
 #endif
     xTaskCreatePinnedToCore(diagnosticsTask, "Diagnostico", 3072, nullptr, 1,
-                            &diagnosticsTaskHandle, CONFIG_FREERTOS_UNICORE ? 0 : 1);
+                            &diagnosticsTaskHandle, workerCore);
     // Cada monitor queda fijado al nucleo que mide.
     xTaskCreatePinnedToCore(cpuMonitorTask, "CPU0", 2048,
                             reinterpret_cast<void *>(0), 1, nullptr, 0);
-#if !CONFIG_FREERTOS_UNICORE
+#if SOC_CPU_CORES_NUM > 1
     xTaskCreatePinnedToCore(cpuMonitorTask, "CPU1", 2048,
                             reinterpret_cast<void *>(1), 1, nullptr, 1);
 #endif
