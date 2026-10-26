@@ -6,6 +6,13 @@
 // Proporciona funciones generales del sistema ESP32.
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "soc/soc_caps.h"
+
+#if SOC_HALL_SENSOR_SUPPORTED
+constexpr bool HALL_SENSOR_SUPPORTED = true;
+#else
+constexpr bool HALL_SENSOR_SUPPORTED = false;
+#endif
 
 // Nombre visible de la red creada por el ESP32.
 constexpr char ACCESS_POINT_NAME[] = "ESP32-RTOS";
@@ -64,6 +71,7 @@ void sensorTask(void *parameter)
 
     while (true)
     {
+#if SOC_HALL_SENSOR_SUPPORTED
         // hallRead devuelve la medicion actual del sensor Hall interno.
         const int currentHallValue = hallRead();
 
@@ -92,6 +100,7 @@ void sensorTask(void *parameter)
             // Permite que otra tarea consulte la instantanea.
             xSemaphoreGive(snapshotMutex);
         }
+#endif
 
         // Libera el Core 1 hasta la proxima lectura.
         vTaskDelay(SENSOR_PERIOD);
@@ -198,14 +207,21 @@ String snapshotAsJson()
 
     // Comienza el objeto JSON que consumira el codigo JavaScript.
     String json = "{";
-    json += "\"hall\":" + String(currentSnapshot.hallValue);
-    json += ",\"hallMinimum\":" + String(currentSnapshot.hallMinimum);
-    json += ",\"hallMaximum\":" + String(currentSnapshot.hallMaximum);
-    json += ",\"hallAverage\":" + String(currentSnapshot.hallAverage, 1);
+    json += "\"hallAvailable\":" + String(HALL_SENSOR_SUPPORTED ? "true" : "false");
+    if (HALL_SENSOR_SUPPORTED)
+    {
+        json += ",\"hall\":" + String(currentSnapshot.hallValue);
+        json += ",\"hallMinimum\":" + String(currentSnapshot.hallMinimum);
+        json += ",\"hallMaximum\":" + String(currentSnapshot.hallMaximum);
+        json += ",\"hallAverage\":" + String(currentSnapshot.hallAverage, 1);
+    }
     json += ",\"heap\":" + String(currentSnapshot.freeHeap);
     json += ",\"minimumFreeHeap\":" + String(currentSnapshot.minimumFreeHeap);
     json += ",\"largestFreeBlock\":" + String(currentSnapshot.largestFreeBlock);
-    json += ",\"sensorStack\":" + String(currentSnapshot.sensorStack);
+    if (HALL_SENSOR_SUPPORTED)
+    {
+        json += ",\"sensorStack\":" + String(currentSnapshot.sensorStack);
+    }
     json += ",\"diagnosticsStack\":" + String(currentSnapshot.diagnosticsStack);
     json += ",\"cpu0\":" + String(currentSnapshot.cpu0Usage, 1);
     json += ",\"cpu1\":" + String(currentSnapshot.cpu1Usage, 1);
@@ -247,7 +263,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <p><span>Heap libre</span><strong id="heap">-</strong></p>
         <p><span>Heap libre minimo</span><strong id="minimumFreeHeap">-</strong></p>
         <p><span>Bloque libre mas grande</span><strong id="largestFreeBlock">-</strong></p>
-    <p><span>Sensor Hall</span><strong id="hall">-</strong></p>
+    <div id="hallSection">
+      <p><span>Sensor Hall</span><strong id="hall">-</strong></p>
+    </div>
     <p><span>Tiempo activo</span><strong id="uptime">-</strong></p>
   </section>
     <section>
@@ -261,7 +279,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <p><span>Flash</span><strong id="flashKB">-</strong></p>
         <p><span>PSRAM</span><strong id="psramKB">-</strong></p>
     </section>
-    <section>
+    <section id="hallStatistics">
         <h2>Estadisticas del Hall</h2>
         <p><span>Minimo</span><strong id="hallMinimum">-</strong></p>
         <p><span>Maximo</span><strong id="hallMaximum">-</strong></p>
@@ -269,8 +287,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </section>
   <section>
     <h2>Pila minima libre (palabras)</h2>
-    <p><span>Tarea Sensor, Core 1</span><strong id="sensorStack">-</strong></p>
-    <p><span>Tarea Diagnostico, Core 1</span><strong id="diagnosticsStack">-</strong></p>
+    <p id="sensorStackRow"><span>Tarea Sensor</span><strong id="sensorStack">-</strong></p>
+    <p><span>Tarea Diagnostico</span><strong id="diagnosticsStack">-</strong></p>
   </section>
   <script>
     // Solicita una nueva instantanea al servidor.
@@ -283,8 +301,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.querySelector('#heap').textContent = data.heap + ' bytes';
     document.querySelector('#minimumFreeHeap').textContent = data.minimumFreeHeap + ' bytes';
     document.querySelector('#largestFreeBlock').textContent = data.largestFreeBlock + ' bytes';
-      document.querySelector('#hall').textContent = data.hall;
-      document.querySelector('#uptime').textContent = data.uptime + ' s';
+    document.querySelector('#uptime').textContent = data.uptime + ' s';
     document.querySelector('#connectedStations').textContent = data.connectedStations;
     document.querySelector('#ip').textContent = data.ip;
     document.querySelector('#wifiChannel').textContent = data.wifiChannel;
@@ -293,11 +310,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     document.querySelector('#cpuMHz').textContent = data.cpuMHz + ' MHz';
     document.querySelector('#flashKB').textContent = data.flashKB + ' KB';
     document.querySelector('#psramKB').textContent = data.psramKB + ' KB';
-      document.querySelector('#sensorStack').textContent = data.sensorStack;
       document.querySelector('#diagnosticsStack').textContent = data.diagnosticsStack;
-    document.querySelector('#hallMinimum').textContent = data.hallMinimum;
-    document.querySelector('#hallMaximum').textContent = data.hallMaximum;
-    document.querySelector('#hallAverage').textContent = data.hallAverage;
+      const hallVisible = data.hallAvailable;
+      document.querySelector('#hallSection').hidden = !hallVisible;
+      document.querySelector('#hallStatistics').hidden = !hallVisible;
+      document.querySelector('#sensorStackRow').hidden = !hallVisible;
+      if (hallVisible) {
+        document.querySelector('#hall').textContent = data.hall;
+        document.querySelector('#sensorStack').textContent = data.sensorStack;
+        document.querySelector('#hallMinimum').textContent = data.hallMinimum;
+        document.querySelector('#hallMaximum').textContent = data.hallMaximum;
+        document.querySelector('#hallAverage').textContent = data.hallAverage;
+      }
     }
     // Carga datos apenas termina de abrirse la pagina.
     updatePanel();
@@ -334,16 +358,20 @@ void setup()
     Serial.print("Abrir http://");
     Serial.println(WiFi.softAPIP());
 
-    // Sensor y diagnostico comparten el Core 1.
+    // Sensor y diagnostico comparten el ultimo nucleo disponible.
+#if SOC_HALL_SENSOR_SUPPORTED
     xTaskCreatePinnedToCore(sensorTask, "Sensor", 2048, nullptr, 2,
-                            &sensorTaskHandle, 1);
+                            &sensorTaskHandle, CONFIG_FREERTOS_UNICORE ? 0 : 1);
+#endif
     xTaskCreatePinnedToCore(diagnosticsTask, "Diagnostico", 3072, nullptr, 1,
-                            &diagnosticsTaskHandle, 1);
+                            &diagnosticsTaskHandle, CONFIG_FREERTOS_UNICORE ? 0 : 1);
     // Cada monitor queda fijado al nucleo que mide.
     xTaskCreatePinnedToCore(cpuMonitorTask, "CPU0", 2048,
                             reinterpret_cast<void *>(0), 1, nullptr, 0);
+#if !CONFIG_FREERTOS_UNICORE
     xTaskCreatePinnedToCore(cpuMonitorTask, "CPU1", 2048,
                             reinterpret_cast<void *>(1), 1, nullptr, 1);
+#endif
 }
 
 void loop()
