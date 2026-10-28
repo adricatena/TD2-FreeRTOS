@@ -2,7 +2,7 @@
 
 Repositorio de trabajos prácticos para la materia **Técnicas Digitales 2** de la carrera de **Ingeniería Electrónica** en la **Universidad Tecnológica Nacional (UTN)**.
 
-El objetivo es introducir el uso de **FreeRTOS** sobre placas **ESP32** mediante cuatro proyectos pequeños y progresivos.
+El objetivo es introducir el uso de **FreeRTOS** sobre placas **ESP32** mediante proyectos pequeños y progresivos.
 
 ## Proyectos
 
@@ -10,6 +10,7 @@ El objetivo es introducir el uso de **FreeRTOS** sobre placas **ESP32** mediante
 2. Uso de retardos, temporización y medición de carga.
 3. Comunicación entre tareas y sincronización.
 4. Servidor web y diagnóstico de FreeRTOS en ambos núcleos.
+5. Estacion de monitoreo y control integradora de FreeRTOS.
 
 ## Requisitos
 
