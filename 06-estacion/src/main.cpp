@@ -12,10 +12,11 @@
 
 // Los periodos se expresan en ticks, no en milisegundos.
 constexpr TickType_t SENSOR_PERIOD = pdMS_TO_TICKS(2000);
-constexpr TickType_t DIAGNOSTICS_PERIOD = pdMS_TO_TICKS(5000);
 constexpr TickType_t COMMAND_POLL_PERIOD = pdMS_TO_TICKS(50);
 constexpr TickType_t ACTUATOR_TIMEOUT = pdMS_TO_TICKS(50);
 constexpr TickType_t PUMP_SAFETY_TIME = pdMS_TO_TICKS(10000);
+constexpr TickType_t ALARM_LED_PERIOD = pdMS_TO_TICKS(100);
+constexpr uint8_t SYSTEM_LED_PIN = LED_BUILTIN;
 // Limite fijo: no se reservan buffers dinamicos para cada linea recibida.
 constexpr size_t COMMAND_TEXT_SIZE = 64;
 
@@ -117,7 +118,6 @@ TimerHandle_t pumpSafetyTimer = nullptr;
 TaskHandle_t sensorTaskHandle = nullptr;
 TaskHandle_t controlTaskHandle = nullptr;
 TaskHandle_t commandTaskHandle = nullptr;
-TaskHandle_t diagnosticsTaskHandle = nullptr;
 TaskHandle_t alarmTaskHandle = nullptr;
 
 SystemState state = {};
@@ -217,7 +217,6 @@ void publishEvent(EventType type)
             state.eventsDropped++;
             xSemaphoreGive(stateMutex);
         }
-        Serial.printf("[Evento] Descartado: %s\n", eventName(type));
         return;
     }
 
@@ -238,15 +237,7 @@ bool setActuators(bool fan, bool pump, bool light)
 {
     // Dos tareas no pueden modificar las salidas al mismo tiempo.
     if (xSemaphoreTake(actuatorSemaphore, ACTUATOR_TIMEOUT) != pdTRUE)
-    {
-        Serial.println("[Actuadores] Recurso ocupado.");
         return false;
-    }
-
-    Serial.printf("[Actuadores] ventilador=%s, bomba=%s, luz=%s\n",
-                  fan ? "ON" : "OFF",
-                  pump ? "ON" : "OFF",
-                  light ? "ON" : "OFF");
 
     const bool stateUpdated =
         xSemaphoreTake(stateMutex, ACTUATOR_TIMEOUT) == pdTRUE;
@@ -258,8 +249,6 @@ bool setActuators(bool fan, bool pump, bool light)
         xSemaphoreGive(stateMutex);
     }
     xSemaphoreGive(actuatorSemaphore);
-    if (!stateUpdated)
-        Serial.println("[Actuadores] No se pudo actualizar el estado.");
     return stateUpdated;
 }
 
@@ -269,8 +258,7 @@ void pumpSafetyTimerCallback(TimerHandle_t timer)
     (void)timer;
 
     const Command command = {CommandType::PumpOff, "timer pump off"};
-    if (xQueueSend(commandQueue, &command, 0) != pdTRUE)
-        Serial.println("[Timer] No se pudo enviar apagado de seguridad.");
+    xQueueSend(commandQueue, &command, 0);
 }
 
 // Produce mediciones periodicas y simula el final de una conversion.
@@ -300,7 +288,6 @@ void sensorTask(void *parameter)
                 state.measurementsDropped++;
                 xSemaphoreGive(stateMutex);
             }
-            Serial.println("[Sensor] Medicion descartada: cola llena.");
         }
 
         // El bit se mantiene activo hasta que otro componente lo limpie.
@@ -329,10 +316,7 @@ void controlTask(void *parameter)
         {
             SystemState current = {};
             if (!copyState(current))
-            {
-                Serial.println("[Control] No se pudo leer el estado.");
                 continue;
-            }
 
             if (command.type == CommandType::Help)
             {
@@ -424,10 +408,7 @@ void controlTask(void *parameter)
         {
             SystemState current = {};
             if (xSemaphoreTake(stateMutex, ACTUATOR_TIMEOUT) != pdTRUE)
-            {
-                Serial.println("[Control] No se pudo actualizar el estado.");
                 continue;
-            }
             state.lastMeasurement = measurement;
             state.measurementsReceived++;
             current = state;
@@ -462,11 +443,6 @@ void controlTask(void *parameter)
                 xEventGroupSetBits(systemEvents, CONTROL_READY_BIT);
                 firstMeasurement = false;
             }
-
-            Serial.printf("[Control] T=%.1f C, H=%.1f %%, agua=%.1f %%\n",
-                          measurement.temperature,
-                          measurement.humidity,
-                          measurement.waterLevel);
         }
     }
 }
@@ -541,8 +517,6 @@ void alarmTask(void *parameter)
                 xSemaphoreGive(stateMutex);
             }
 
-            Serial.printf("[Alarma] Evento: %s\n", eventName(event.type));
-
             // Una emergencia siempre fuerza todas las salidas a apagado.
             if (event.type == EventType::EmergencyStop)
             {
@@ -554,33 +528,32 @@ void alarmTask(void *parameter)
     }
 }
 
-// Observa el estado y los recursos sin retener el mutex durante Serial.
-void diagnosticsTask(void *parameter)
+// El LED representa el estado global: apagado, encendido fijo o titilando.
+void systemLedTask(void *parameter)
 {
     (void)parameter;
+    bool ledOn = false;
+
+    pinMode(SYSTEM_LED_PIN, OUTPUT);
 
     for (;;)
     {
-        // Este periodo es menos frecuente porque no participa del control.
-        vTaskDelay(DIAGNOSTICS_PERIOD);
-
         SystemState current = {};
         if (copyState(current))
         {
-            Serial.printf(
-                "[Diag] mediciones=%lu, comandos=%lu, rechazados=%lu, "
-                "heap=%lu, stackControl=%lu\n",
-                static_cast<unsigned long>(current.measurementsReceived),
-                static_cast<unsigned long>(current.commandsReceived),
-                static_cast<unsigned long>(current.commandsRejected),
-                static_cast<unsigned long>(ESP.getFreeHeap()),
-                static_cast<unsigned long>(
-                    uxTaskGetStackHighWaterMark(controlTaskHandle)));
+            if (current.alarmOn)
+            {
+                ledOn = !ledOn;
+                digitalWrite(SYSTEM_LED_PIN, ledOn ? HIGH : LOW);
+            }
+            else
+            {
+                ledOn = current.fanOn || current.pumpOn || current.lightOn;
+                digitalWrite(SYSTEM_LED_PIN, ledOn ? HIGH : LOW);
+            }
         }
-        else
-        {
-            Serial.println("[Diag] No se pudo copiar el estado.");
-        }
+
+        vTaskDelay(ALARM_LED_PERIOD);
     }
 }
 
@@ -588,7 +561,8 @@ void setup()
 {
     Serial.begin(115200);
     delay(200);
-    Serial.println("\n06 - Estacion de monitoreo y control");
+    pinMode(SYSTEM_LED_PIN, OUTPUT);
+    digitalWrite(SYSTEM_LED_PIN, LOW);
 
     // Las colas reciben copias de estructuras de tamano fijo.
     measurementQueue = xQueueCreate(5, sizeof(Measurement));
@@ -613,20 +587,18 @@ void setup()
         actuatorSemaphore == nullptr || sensorConversionSemaphore == nullptr ||
         systemEvents == nullptr || pumpSafetyTimer == nullptr)
     {
-        Serial.println("[Error] No se pudieron crear todos los recursos.");
         return;
     }
 
     // El arranque es automatico, con todas las salidas inicialmente apagadas.
     state.automaticMode = true;
 
-    // Alarma: 4; control: 3; sensor: 2; consola y diagnostico: 1.
+    // Alarma: 4; control: 3; sensor: 2; consola: 1.
     xTaskCreate(alarmTask, "Alarm", 3072, nullptr, 4, &alarmTaskHandle);
     xTaskCreate(controlTask, "Control", 4096, nullptr, 3, &controlTaskHandle);
     xTaskCreate(sensorTask, "Sensor", 3072, nullptr, 2, &sensorTaskHandle);
     xTaskCreate(commandTask, "Command", 3072, nullptr, 1, &commandTaskHandle);
-    xTaskCreate(diagnosticsTask, "Diagnostics", 3072, nullptr, 1,
-                &diagnosticsTaskHandle);
+    xTaskCreate(systemLedTask, "SystemLed", 2048, nullptr, 1, nullptr);
 
     // Espera breve por las condiciones iniciales sin bloquear indefinidamente.
     xEventGroupWaitBits(systemEvents,
@@ -634,8 +606,6 @@ void setup()
                         pdFALSE,
                         pdTRUE,
                         pdMS_TO_TICKS(1000));
-
-    Serial.println("Escriba help para ver los comandos.");
 }
 
 void loop()
